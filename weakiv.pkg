@@ -1,0 +1,4 @@
+v 3
+d weakiv: Package for weak-instrument-robust tests and confidence intervals
+f weakiv.ado
+f weakiv.sthlp
