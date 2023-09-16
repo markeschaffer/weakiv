@@ -1,4 +1,4 @@
-*! weakiv 2.4.10 05Oct2022
+*! weakiv 2.4.11 15sept2023
 *! authors Finlay-Magnusson-Schaffer
 * Usage:
 * <eqn>, <options>         = estimate equation as model=linear/ivprobit/ivtobit.
@@ -132,6 +132,7 @@
 * 2.4.08    16Feb2016   Bug fix - cuepoint option with exactly-IDed model was causing LIML code to crash.
 * 2.4.09    15Oct2016   Fix to catch new Stata 14 behavior of ivprobit - "twostep" now saved in e(method).
 * 2.4.10    03Oct2022   Added support for ddml.
+* 2.4.11    15Sep2023   Updated ddml support.
 
 * to do: possibly allow non-integer test levels e.g. arlevel(85.5)
 *        note possible upper limit to points that contour can render; use scatter option instead
@@ -225,6 +226,8 @@ di as err "Internal weakiv error - preserve failed"
 	local waldcmd		"`s(waldcmd)'"		//  command for original Wald (non-weak-ID-robust) estimation
 	local model			"`s(model)'"
 	local xtmodel		"`s(xtmodel)'"		//  empty if not estimated using panel data estimator
+	local ddmlmodel		"`s(ddmlmodel)'"	//  empty if not estimated using ddml
+	local ddmlreps		"`s(ddmlreps)'"		//  empty if not estimated using ddml
 	local ivtitle		"`s(ivtitle)'"
 	local depvar		"`s(depvar)'"
 	local depvar_t		"`s(depvar_t)'"
@@ -249,6 +252,11 @@ di as err "Internal weakiv error - preserve failed"
 	local gmminsts2		"`s(gmminsts2)'"	//  Specific to xtabond2
 	local ivinsts1		"`s(ivinsts1)'"		//  Specific to xtabond2
 	local ivinsts2		"`s(ivinsts2)'"		//  Specific to xtabond2
+	local depvar_ddml_t	"`s(depvar_ddml_t)'"	//  Specific to ddml
+	local endo_ddml_t	"`s(endo_ddml_t)'"		//  Specific to ddml
+	local wendo_ddml_t	"`s(wendo_ddml_t)'"		//  Specific to ddml
+	local inexog_ddml_t	"`s(inexog_ddml_t)'"	//  Specific to ddml
+	local exexog_ddml_t	"`s(exexog_ddml_t)'"	//  Specific to ddml
 	local noconstant	"`s(noconstant)'"	//  "noconstant" if no constant in original model specification
 	local cons			"`s(cons)'"			//  0 if no constant in original model
 	local nendog		"`s(nendog)'"		//  These counts will be overwritten after collinears etc. are removed
@@ -559,6 +567,114 @@ di as err "Fixed-effects estimation requires data to be -xtset-"
 		local tvar "`r(timevar)'"
 	}
 
+***************************** DDML TRANSFORMS ***********************************************
+* Transform data (FE or FD) if required.  Data already preserved.
+	if "`ddmlmodel'" ~= "" {
+		// replace predicted values with residuals
+		if `ddmlreps'>1 {
+			// pool multiple reps
+			// generate (new) cluster id
+			tempvar clustid repid
+			qui gen long `clustid'=_n
+			tempname REP ID ID_i OV OV_i Y Y_i D D_i Z Z_i
+			local ovlist `depvar' `endo' `exexog'
+			local novlist : word count `ovlist'
+			local ndlist : word count `endo_ddml_t'
+			local nzlist : word count `exexog_ddml_t'
+			mata: `OV' = J(0,`novlist',.)
+			mata: `ID' = J(0,1,.)
+			mata: `REP' = J(0,1,.)
+			mata: `Y' = J(0,1,.)
+			mata: `D' = J(0,`ndlist',.)
+			mata: `Z' = J(0,`nzlist',.)
+			forvalues r=1/`ddmlreps' {
+				local dlist_i
+				forvalues j=1/`ndlist' {
+					local d_i : word `j' of `endo_ddml_t'
+					local dlist_i `dlist_i' `d_i'_`r'
+				}
+				local zlist_i
+				forvalues j=1/`nzlist' {
+					local z_i : word `j' of `exexog_ddml_t'
+					local zlist_i `zlist_i' `z_i'_`r'
+				}
+				qui putmata	`ID_i' = `clustid'				///
+							`OV_i' = (`ovlist')				///
+							`Y_i' = `depvar_ddml_t'_`r'		///
+							`D_i' = (`dlist_i')				///
+							`Z_i' = (`zlist_i')				///
+							if `touse', replace
+				// center
+				mata: `OV_i' = (`OV_i' :- mean(`OV_i'))
+				mata: `Y_i' = (`Y_i' :- mean(`Y_i'))
+				mata: `D_i' = (`D_i' :- mean(`D_i'))
+				mata: `Z_i' = (`Z_i' :- mean(`Z_i'))
+				mata: `ID' = `ID' \ `ID_i'
+				mata: `REP' = `REP' \ J(rows(`ID_i'),1,`r')
+				mata: `OV' = `OV' \ `OV_i'
+				mata: `Y' = `Y' \ `Y_i'
+				mata: `D' = `D' \ `D_i'
+				mata: `Z' = `Z' \ `Z_i'
+			}
+			qui getmata		`clustid'=`ID'					///
+							`repid'=`REP'					///
+							 (`ovlist')=`OV'				///
+							 `depvar_ddml_t'=`Y'			///
+							 (`endo_ddml_t')=`D'			///
+							 (`exexog_ddml_t')=`Z'			///
+							 , replace force
+			cap mata: mata drop `ID' `ID_i' `REP' `OV' `OV_i' `Y' `Y_i' `D' `D_i' `Z' `Z_i'
+			local depvar_t	`depvar_ddml_t'
+			local endo_t	`endo_ddml_t'
+			local exexog_t	`exexog_ddml_t'
+			qui replace `touse' = `clustid'<.
+			local cluster cluster(_n)
+			local clustvar _n
+			local clustvar_t `clustid'
+			local N_clust=`N'
+			qui count if `touse'
+			local N=r(N)
+			local iid=0
+			local robust robust
+			local vceopt cluster(`clustvar_t')
+		}
+	
+		if "`ddmlmodel'"=="iv" {
+			qui replace `depvar_t' = `depvar' - `depvar_t'
+			forvalues i=1/`nendog' {
+				local endo_i		: word `i' of `endo'
+				local endo_t_i		: word `i' of `endo_t'
+				qui replace `endo_t_i' = `endo_i' - `endo_t_i'
+			}
+			forvalues i=1/`nexexog' {
+				local exexog_i		: word `i' of `exexog'
+				local exexog_t_i	: word `i' of `exexog_t'
+				qui replace `exexog_t_i' = `exexog_i' - `exexog_t_i'
+			}
+		}
+		else if "`ddmlmodel'"=="fiv" {
+			// exexog_t variable is actually ddml dh variable
+			tempvar dhat dhat_h
+			qui gen double `dhat_h' = `exexog_t'
+			qui gen double `dhat' = `endo_t'
+			// in fiv model, residualized D is D-dhat_h and opt IV is dhat-dhat_h
+			qui replace `depvar_t' = `depvar' - `depvar_t'
+			qui replace `endo_t' = `endo' - `dhat_h'
+			qui replace `exexog_t' = `dhat' - `dhat_h'
+		}
+		else {
+			di as err "error - unsupported ddml model"
+			exit 198
+		}
+		if `ddmlreps'>1 {
+			// pool multiple reps to get standard IV beta w/cluster-robust vcv
+			// already centered by rep so use nocons
+			qui ivreg `depvar_t' (`endo_t'=`exexog_t') if `touse', cluster(`clustid') nocons
+			// replicate ivreg2 treatment accounting for clustering and rep-specific intercepts
+			mat `var_wbeta' = e(V) * (e(N)-`ddmlreps'-`nendog')/(e(N)-1)
+			mat `wbeta' = e(b)
+		}
+	}
 ******************************* PARTIAL-OUT *************************************************
 * Always partial out exogenous regressors in linear models.
 * `npartial' is #vars partialled out; includes constant in count
@@ -3337,35 +3453,75 @@ program define parse_ddml, sclass
 
 	local cons		= 0									// always nocons
 	local noconstant "noconstant"
+	local N					"`e(N)'"
+	local N_clust			"`e(N_clust)'"
+	
+	// detect whether ddml estimation is mean or median over multiple reps
+	local ddmlreps			: word count `e(y_mn)' `e(y_md)'
 
-	local depvar			`e(depvar)'
-	local depvar_t			`e(y_m)'
+	local ddmlmodel			"`e(model)'"
+	local depvar			`e(yname)'
 	local endo				`e(dnames)'
-	local endo_t			`e(d_m)'
 	local wendo				`endo'
-	local wendo_t			`endo_t'
-	local exexog			`e(z_m)'
-	local exexog_t			`e(z_m)'
+	local exexog			`e(znames)'
+	if `ddmlreps'<=1 {
+		// single rep case; existing Stata variables
+		local depvar_t			`e(y_m)'
+		local endo_t			`e(d_m)'
+		local wendo_t			`endo_t'
+		// exexog_t holds either pred val of z for iv model or "dh" for fiv model
+		local exexog_t			`e(z_m)' `e(dh_m)'
+	}
+	else {
+		// multiple rep case; prefix for Stata variables, prefix itself isn't a var
+		local depvar_ddml_t		`e(y_m)'
+		local endo_ddml_t		`e(d_m)'
+		local wendo_ddml_t		`endo_ddml_t'
+		// exexog_t holds either pred val of z for iv model or "dh" for fiv model
+		local exexog_ddml_t		`e(z_m)' `e(dh_m)'
+		// but also need to populate the standard varlists so that checks don't fail
+		local depvar_t			`e(depvar)'
+		local endo_t			`e(dnames)'
+		local wendo_t			`endo_t'
+		// fiv model doesn't have exexog per se so use endog varnames
+		if "`ddmlmodel'"=="iv"	local exexog_t `e(znames)'
+		else					local exexog_t `e(dnames)'
+		// always cluster-robust
+		local robust			robust
+		// temp - will be overwriten or used in text output
+		local cluster			cluster(.)
+		local clustvar			.
+		local clustvar1			observation
+		local N_clust			`N'
+	}
 
 * Return values
+	sreturn local ddmlmodel		"`ddmlmodel'"
+	sreturn local ddmlreps		"`ddmlreps'"
 	sreturn local depvar		"`depvar'"
 	sreturn local depvar_t		"`depvar_t'"
+	sreturn local depvar_ddml_t	"`depvar_ddml_t'"
 	sreturn local endo			"`endo'"
 	sreturn local endo_t		"`endo_t'"
+	sreturn local endo_ddml_t	"`endo_ddml_t'"
 	sreturn local inexog							//  always empty
 	sreturn local inexog_t							//  always empty
+	sreturn local inexog_ddml_t	"`inexog_ddml_t'"
 	sreturn local exexog		"`exexog'"
 	sreturn local exexog_t		"`exexog_t'"
+	sreturn local exexog_ddml_t	"`exexog_ddml_t'"
 	sreturn local wendo			"`wendo'"
 	sreturn local wendo_t		"`wendo_t'"
-	sreturn local N				"`e(N)'"
-	sreturn local N_clust		"`e(N_clust)'"
+	sreturn local wendo_ddml_t	"`wendo_ddml_t'"
+	sreturn local N				"`N'"
+	sreturn local N_clust		"`N_clust'"
 	sreturn local cluster		"`cluster'"
 	sreturn local clustvar		"`clustvar'"
+	sreturn local clustvar1		"`clustvar1'"
 	sreturn local cons			"`cons'"
 	sreturn local noconstant	"`noconstant'"
 	sreturn local small			"`small'"
-	sreturn local dofminus		=0
+	sreturn local dofminus		0
 	sreturn local robust		"`robust'"
 
 	sreturn local model			"`model'"
