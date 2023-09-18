@@ -568,14 +568,20 @@ di as err "Fixed-effects estimation requires data to be -xtset-"
 	}
 
 ***************************** DDML TRANSFORMS ***********************************************
-* Transform data (FE or FD) if required.  Data already preserved.
+* Transform data.  Data already preserved.
 	if "`ddmlmodel'" ~= "" {
 		// replace predicted values with residuals
 		if `ddmlreps'>1 {
 			// pool multiple reps
-			// generate (new) cluster id
 			tempvar clustid repid
-			qui gen long `clustid'=_n
+			// if no clustering already, generate (new) cluster id
+			// clustid tempvar used only here
+			if "`clustvar'"=="" {
+				qui gen long `clustid'=_n
+			}
+			else {
+				qui egen long `clustid'=group(`clustvar')
+			}
 			tempname REP ID ID_i OV OV_i Y Y_i D D_i Z Z_i
 			local ovlist `depvar' `endo' `exexog'
 			local novlist : word count `ovlist'
@@ -628,6 +634,7 @@ di as err "Fixed-effects estimation requires data to be -xtset-"
 			local endo_t	`endo_ddml_t'
 			local exexog_t	`exexog_ddml_t'
 			qui replace `touse' = `clustid'<.
+			// overwrite/update
 			local cluster cluster(_n)
 			local clustvar _n
 			local clustvar_t `clustid'
@@ -3449,9 +3456,10 @@ program define parse_ddml, sclass
 	if "`e(clustvar)'"~="" {							//  enter if 1- or 2-way clustering
 		local cluster		"cluster(`e(clustvar)')"	//  = "cluster( <varlist> )"
 		local clustvar		"`e(clustvar)'"				//  = <varlist> (1- or 2-way clustering)
+		local clustvar1		"`e(clustvar)'"				//  default is same as clustvar
 	}
 
-	local cons		= 0									// always nocons
+	local cons				"`e(cons)'"
 	local noconstant "noconstant"
 	local N					"`e(N)'"
 	local N_clust			"`e(N_clust)'"
@@ -3460,6 +3468,11 @@ program define parse_ddml, sclass
 	local ddmlreps			: word count `e(y_mn)' `e(y_md)'
 
 	local ddmlmodel			"`e(model)'"
+	if "`ddmlmodel'"~="iv" &  "`ddmlmodel'"~="fiv" {
+		di as err "error - ddml model `ddmlmodel' not supported by weakiv"
+		exit 198
+	}
+	
 	local depvar			`e(yname)'
 	local endo				`e(dnames)'
 	local wendo				`endo'
@@ -3488,10 +3501,12 @@ program define parse_ddml, sclass
 		else					local exexog_t `e(dnames)'
 		// always cluster-robust
 		local robust			robust
-		// temp - will be overwriten or used in text output
-		local cluster			cluster(.)
-		local clustvar			.
-		local clustvar1			observation
+		if "`clustvar'"=="" {
+			// temporary - will be used in text output and then overwritten
+			// make local = "observation" in case no clustering to start with
+			local cluster			cluster(.)
+			local clustvar1			observation
+		}
 		local N_clust			`N'
 	}
 
