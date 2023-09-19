@@ -144,7 +144,7 @@
 
 program define weakiv, eclass byable(recall) sortpreserve
 	version 11.2
-	local lversion 02.4.10
+	local lversion 02.4.11
 	local avarversion 01.0.04
 	local ranktestversion 01.3.03
 
